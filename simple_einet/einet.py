@@ -144,6 +144,66 @@ class Einet(nn.Module):
         assert x.shape == (batch_size, self.config.num_classes)
 
         return x
+    
+    def integrate(self, interval: torch.Tensor, marginalized_scopes: torch.Tensor = None) -> torch.Tensor:
+        """
+        Inference pass for the Einet model.
+
+        Args:
+          interval (torch.Tensor): Integration interval of shape [N, C, D, 2], where C is the number of input channels (useful for images) and D is the number of features/random variables (H*W for images).
+          marginalized_scopes: torch.Tensor:  (Default value = None)
+
+        Returns:
+            The integration of probability density over the interval: ∫p(X)  or ∫p(X | C) if number of classes > 1.
+        """
+
+        # Add channel dimension if not present
+        if interval.dim() == 3:  # [N, D, 2]
+            interval = interval.unsqueeze(1)
+
+        if interval.dim() == 5:  # [N, C, H, W, 2]
+            interval = interval.view(interval.shape[0], self.config.num_channels, interval.shape[2] * interval.shape[3], 2)
+
+        if marginalized_scopes is not None:
+            raise NotImplementedError
+
+        assert interval.dim() == 4
+        assert (
+            interval.shape[1] == self.config.num_channels
+        ), f"Number of channels in input ({interval.shape[1]}) does not match number of channels specified in config ({self.config.num_channels})."
+        assert (
+                interval.shape[2] == self.config.num_features
+        ), f"Number of features in input ({interval.shape[0]}) does not match number of features specified in config ({self.config.num_features})."
+        assert (
+                interval.shape[3] == 2
+        ), f"The bounds of each interval should be exactly 2."
+
+        # Apply leaf distributions (replace marginalization indicators with 0.0 first)
+        result = self.leaf.integrate(interval)
+
+        # Pass through intermediate layers
+        result = self._forward_layers(result)
+
+        # Merge results from the different repetitions into the channel dimension
+        batch_size, features, channels, repetitions = result.size()
+        assert features == 1  # number of features should be 1 at this point
+        assert channels == self.config.num_classes
+
+        # If model has multiple reptitions, perform repetition mixing
+        if self.config.num_repetitions > 1:
+            # Mix repetitions
+            result = self.mixing(result)
+        else:
+            # Remove repetition index
+            result = result.squeeze(-1)
+
+        # Remove feature dimension
+        result = result.squeeze(1)
+
+        # Final shape check
+        assert result.shape == (batch_size, self.config.num_classes)
+
+        return result.exp()
 
     def _forward_layers(self, x):
         """

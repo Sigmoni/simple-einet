@@ -13,6 +13,36 @@ from torch.nn import functional as F
 logger = logging.getLogger(__name__)
 
 
+def dist_cdf(distribution, x: torch.Tensor):
+    """
+    Get CDF at certain point from arbitrary PyTorch distribution.
+
+    Args:
+        distribution: PyTorch base distribution which implements the `.cdf()` interface.
+        x: Input to compute the log probabilities of.
+           Shape [n, d].
+
+    Returns:
+        torch.Tensor: Log probabilities for each feature.
+    """
+    # Make room for out_channels and num_repetitions of layer
+
+    if x.dim() == 3:  # [N, C, D]
+        x = x.unsqueeze(-1).unsqueeze(-1)  # [N, C, D, 1, 1]
+        #num_leaves = distribution.batch_shape[3]
+        #num_repetitions = distribution.batch_shape[4]
+        #x = x.repeat(1, 1, 1, num_leaves, num_repetitions)
+
+    # Compute cdf
+    try:
+        x = distribution.cdf(x)  # Shape: [n, d, oc, r]
+    except ValueError as e:
+        print("min:", x.min())
+        print("max:", x.max())
+        raise e
+
+    return x
+
 def dist_forward(distribution, x: torch.Tensor):
     """
     Forward pass with an arbitrary PyTorch distribution.
@@ -262,6 +292,28 @@ class AbstractLeaf(AbstractLayer, ABC):
         x = self._marginalize_input(x, marginalized_scopes)
 
         return x
+    
+    def integrate(self, interval):
+        """
+        Get integration from distribution.
+
+        Args:
+            interval (torch.Tensor): Integration interval.
+
+        Returns:
+            torch.Tensor: Output tensor after marginalization.
+        """
+        # Forward through base distribution
+        d = self._get_base_distribution()
+        lb, ub = interval.unbind(-1)
+        high = dist_cdf(d, ub)
+        low = dist_cdf(d, lb)
+        res = high - low
+        res = torch.where(res < 0.001, 0.001, res)
+        res = torch.where(res > 0.999, 0.999, res)
+        res = res.log()
+
+        return res
 
     @abstractmethod
     def _get_base_distribution(self, ctx: SamplingContext = None) -> dist.Distribution:

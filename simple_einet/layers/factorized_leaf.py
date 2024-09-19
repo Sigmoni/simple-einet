@@ -93,6 +93,34 @@ class FactorizedLeaf(AbstractLayer):
             self.num_repetitions,
         )
         return x
+    
+    def integrate(self, interval: torch.Tensor):
+        """
+        Forward pass through the factorized leaf layer.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, num_input_channels, num_leaves, num_repetitions).
+            marginalized_scopes (List[int]): List of integers representing the marginalized scopes.
+
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, num_output_channels, num_leaves, num_repetitions).
+        """
+        # Forward through base leaf
+        x = self.base_leaf.integrate(interval)
+
+        # Factorize input channels
+        x = x.sum(dim=1)
+
+        # Merge scopes by naive factorization
+        x = torch.einsum("bicr,ior->bocr", x, self.scopes)
+
+        assert x.shape == (
+            x.shape[0],
+            self.num_features_out,
+            self.base_leaf.num_leaves,
+            self.num_repetitions,
+        )
+        return x
 
     def sample(self, ctx: SamplingContext) -> torch.Tensor:
         """
