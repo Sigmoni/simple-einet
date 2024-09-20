@@ -529,6 +529,190 @@ class Einet(nn.Module):
                 return evidence
             else:
                 return samples
+            
+    def range_sample(
+        self,
+        num_samples: int = None,
+        interval: torch.tensor = None,
+        class_index=None,
+        evidence: torch.Tensor = None,
+        is_mpe: bool = False,
+        mpe_at_leaves: bool = False,
+        temperature_leaves: float = 1.0,
+        temperature_sums: float = 1.0,
+        marginalized_scopes: List[int] = None,
+        is_differentiable: bool = False,
+        seed: int = None,
+    ):
+        """
+        Sample from the distribution represented by this SPN.
+
+        Possible valid inputs:
+
+        - `num_samples`: Generates `num_samples` samples.
+        - `num_samples` and `class_index (int)`: Generates `num_samples` samples from P(X | C = class_index).
+        - `class_index (List[int])`: Generates `len(class_index)` samples. Each index `c_i` in `class_index` is mapped
+            to a sample from P(X | C = c_i)
+        - `evidence`: If evidence is given, samples conditionally and fill NaN values.
+
+        Args:
+            num_samples: Number of samples to generate.
+            class_index: Class index. Can be either an int in combination with a value for `num_samples` which will result in `num_samples`
+                samples from P(X | C = class_index). Or can be a list of ints which will map each index `c_i` in the
+                list to a sample from P(X | C = c_i).
+            evidence: Evidence that can be provided to condition the samples. If evidence is given, `num_samples` and
+                `class_index` must be `None`. Evidence must contain NaN values which will be imputed according to the
+                distribution represented by the SPN. The result will contain the evidence and replace all NaNs with the
+                sampled values.
+            is_mpe: Flag to perform max sampling (MPE).
+            mpe_at_leaves: Flag to perform mpe only at leaves.
+            marginalized_scopes: List of scopes to marginalize.
+            is_differentiable: Flag to enable differentiable sampling.
+            seed: Seed for torch.random.
+
+        Returns:
+            torch.Tensor: Samples generated according to the distribution specified by the SPN.
+
+        """
+        class_is_given = class_index is not None
+        evidence_is_given = evidence is not None
+        is_multiclass = self.config.num_classes > 1
+
+        assert not (class_is_given and evidence_is_given), "Cannot provide both, evidence and class indices."
+        assert (
+            num_samples is None or not evidence_is_given
+        ), "Cannot provide both, number of samples to generate (num_samples) and evidence."
+
+        if num_samples is not None:
+            assert num_samples > 0, "Number of samples must be > 0."
+
+        assert interval is not None, "Sampling interval must be given."
+
+        # Add channel dimension if not present
+        if interval.dim() == 3:  # [N, D, 2]
+            interval = interval.unsqueeze(1)
+
+        if interval.dim() == 5:  # [N, C, H, W, 2]
+            interval = interval.view(interval.shape[0], self.config.num_channels, interval.shape[2] * interval.shape[3], 2)
+
+
+        if marginalized_scopes is not None:
+            raise NotImplementedError
+
+        assert interval.dim() == 4
+        assert (
+            interval.shape[1] == self.config.num_channels
+        ), f"Number of channels in input ({interval.shape[1]}) does not match number of channels specified in config ({self.config.num_channels})."
+        assert (
+                interval.shape[2] == self.config.num_features
+        ), f"Number of features in input ({interval.shape[0]}) does not match number of features specified in config ({self.config.num_features})."
+        assert (
+                interval.shape[3] == 2
+        ), f"The bounds of each interval should be exactly 2."
+        assert interval.shape[0] == 1, "Unsurported input."
+
+        interval = interval.repeat(num_samples, 1, 1, 1)
+
+        # if not is_mpe:
+        #     assert ((class_index is not None) and (self.config.num_classes > 1)) or (
+        #         (class_index is None) and (self.config.num_classes == 1)
+        #     ), "Class index must be given if the number of classes is > 1 or must be none if the number of classes is 1."
+
+        if class_is_given:
+            assert (
+                self.config.num_classes > 1
+            ), f"Class indices are only supported when the number of classes for this model is > 1."
+
+        if evidence is not None:
+            # Set n to the number of samples in the evidence
+            num_samples = evidence.shape[0]
+        elif num_samples is None:
+            num_samples = 1
+
+        if is_differentiable:
+            indices_out = torch.ones(
+                size=(num_samples, 1, 1), dtype=torch.float, device=self.__device, requires_grad=True
+            )
+            indices_repetition = torch.ones(
+                size=(num_samples, 1), dtype=torch.float, device=self.__device, requires_grad=True
+            )
+        else:
+            indices_out = torch.zeros(size=(num_samples, 1), dtype=torch.long, device=self.__device)
+            indices_repetition = torch.zeros(size=(num_samples,), dtype=torch.long, device=self.__device)
+
+        ctx = SamplingContext(
+            num_samples=num_samples,
+            is_mpe=is_mpe,
+            mpe_at_leaves=mpe_at_leaves,
+            temperature_leaves=temperature_leaves,
+            temperature_sums=temperature_sums,
+            num_repetitions=self.config.num_repetitions,
+            evidence=evidence,
+            indices_out=indices_out,
+            indices_repetition=indices_repetition,
+            is_differentiable=is_differentiable,
+        )
+        with sampling_context(self, evidence, marginalized_scopes, requires_grad=is_differentiable, seed=seed):
+            if self.config.num_classes > 1:
+                # If class is given, use it as base index
+                if class_index is not None:
+                    # Construct indices tensor based on given classes
+                    if isinstance(class_index, list):
+                        # A list of classes was given, one element for each sample
+                        indices = torch.tensor(class_index, device=self.__device).view(-1, 1)
+                        if is_differentiable:
+                            # TODO: Test this
+                            # One hot encode
+                            indices = torch.zeros(
+                                size=(num_samples, self.config.num_classes, 1), dtype=torch.float, device=self.__device
+                            ).scatter_(1, indices.unsqueeze(-1), 1)
+                            indices.requireds_grad_(True)  # Enable gradients
+                        num_samples = indices.shape[0]
+                    else:
+                        indices = torch.empty(size=(num_samples, 1), dtype=torch.long, device=self.__device)
+                        indices.fill_(class_index)
+                        if is_differentiable:
+                            # TODO: Test this
+                            # One hot encode
+                            indices = torch.zeros(
+                                size=(num_samples, self.config.num_classes, 1), dtype=torch.float, device=self.__device
+                            ).scatter_(1, indices.unsqueeze(-1), 1)
+                            indices.requires_grad_(True)  # Enable gradients
+
+                    ctx.indices_out = indices
+                else:
+                    # Sample class
+                    ctx = self._class_sampling_root.sample(ctx=ctx)
+
+            # Save parent indices that were sampled from the sampling root
+            if self.config.num_repetitions > 1:
+                indices_out_pre_root = ctx.indices_out
+                ctx = self.mixing.sample(ctx=ctx)
+
+                # Obtain repetition indices
+                if is_differentiable:
+                    ctx.indices_repetition = ctx.indices_out.view(num_samples, self.config.num_repetitions)
+                else:
+                    ctx.indices_repetition = ctx.indices_out.view(num_samples)
+                ctx.indices_out = indices_out_pre_root
+
+            # Sample inner layers in reverse order (starting from topmost)
+            for layer in reversed(self.layers):
+                ctx = layer.sample(ctx=ctx)
+
+            # Sample leaf
+            samples = self.leaf.range_sample(ctx=ctx, interval=interval)
+
+            if evidence is not None:
+                # First make a copy such that the original object is not changed
+                evidence = evidence.clone()
+                shape_evidence = evidence.shape
+                evidence = evidence.view_as(samples)
+                evidence[:, :, marginalized_scopes] = samples[:, :, marginalized_scopes].to(evidence.dtype)
+                evidence = evidence.view(shape_evidence)
+                return evidence
+            else:
+                return samples
 
     def extra_repr(self) -> str:
         return f"{self.config}"

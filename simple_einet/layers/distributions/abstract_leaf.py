@@ -169,6 +169,71 @@ def dist_sample(distribution: dist.Distribution, ctx: SamplingContext = None) ->
 
     return samples
 
+def dist_range_sample(distribution: dist.Distribution, ctx: SamplingContext, interval: torch.Tensor, epsilon = 0.000001) -> torch.Tensor:
+    """
+    Sample n samples from a given distribution.
+
+    Args:
+        distribution: Leaf distribution from which to sample from.
+        ctx: Sampling context.
+        interval: Sampling interval
+
+    Returns:
+        torch.Tensor: Samples from the given distribution.
+    """
+
+    # Sample from the specified distribution
+    if ctx.is_mpe or ctx.mpe_at_leaves:
+        raise NotImplementedError
+    else:
+        from simple_einet.layers.distributions.normal import CustomNormal
+
+        if type(distribution) == dist.Normal:
+            distribution = dist.Normal(loc=distribution.loc, scale=distribution.scale / ctx.temperature_leaves)
+        else:
+            raise NotImplementedError
+        lb, ub = interval.unbind(-1)
+        high = dist_cdf(distribution, ub)
+        low = dist_cdf(distribution, lb)
+        diff = high - low
+
+        # assert len(lb.shape) == 3, f"The shape {lb.shape} must be 3-dimentional"
+        # assert lb.shape == diff.shape[:3], f"The shape {lb.shape} does not match with {diff.shape[:3]}"
+
+        # lb = lb.unsqueeze(-1).unsqueeze(-1).expand(diff.shape)
+        # ub = ub.unsqueeze(-1).unsqueeze(-1).expand(diff.shape)
+
+        scalar = torch.rand(size=diff.shape)
+        # samples = torch.where(
+        #     diff < epsilon,
+        #     lb + (ub - lb) * scalar,
+        #     distribution.icdf(low + diff * scalar)
+        # )
+        samples = distribution.icdf(low + diff * scalar)
+
+    assert (
+        samples.shape[1] == 1
+    ), "Something went wrong. First sample size dimension should be size 1 due to the distribution parameter dimensions. Please report this issue."
+
+    # if not context.is_differentiable:  # This happens only in the non-differentiable context
+    # samples.squeeze_(1)
+    num_samples, num_channels, num_features, num_leaves, num_repetitions = samples.shape
+
+    if ctx.is_differentiable:
+        r_idxs = ctx.indices_repetition.view(num_samples, 1, 1, 1, num_repetitions)
+        samples = index_one_hot(samples, index=r_idxs, dim=-1)
+    else:
+        r_idxs = ctx.indices_repetition.view(-1, 1, 1, 1, 1)
+        r_idxs = r_idxs.expand(-1, num_channels, num_features, num_leaves, -1)
+        samples = samples.gather(dim=-1, index=r_idxs)
+        samples = samples.squeeze(-1)
+
+    # If parent index into out_channels are given
+    if ctx.indices_out is not None:
+        # Choose only specific samples for each feature/scope
+        samples = torch.gather(samples, dim=2, index=ctx.indices_out.unsqueeze(-1)).squeeze(-1)
+
+    return samples
 
 class AbstractLeaf(AbstractLayer, ABC):
     """
@@ -332,6 +397,20 @@ class AbstractLeaf(AbstractLayer, ABC):
         """
         d = self._get_base_distribution(ctx)
         samples = dist_sample(distribution=d, ctx=ctx)
+        return samples
+    
+    def range_sample(self, ctx: SamplingContext, interval: torch.Tensor) -> torch.Tensor:
+        """
+        Sample from the distribution represented by this leaf node.
+
+        Args:
+            ctx (SamplingContext, optional): The sampling context to use when drawing samples.
+
+        Returns:
+            torch.Tensor: A tensor of shape (context.num_samples,) or (1,) containing the drawn samples.
+        """
+        d = self._get_base_distribution(ctx)
+        samples = dist_range_sample(distribution=d, ctx=ctx, interval=interval)
         return samples
 
     def extra_repr(self):

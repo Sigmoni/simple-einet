@@ -6,7 +6,10 @@ For a speed benchmark comparison against the official [EinsumNetworks](https://g
 
 ## Update
 
-* 9-19: Add `integrate` interface to EiNet, see [the notebook](./notebooks/multivariate_normal.ipynb) for example.
+* 9-20: Add `range_sample` interface
+* 9-19: Add `integrate` interface to EiNet
+
+See [the notebook](./notebooks/multivariate_normal.ipynb) for demo!!!
 
 ## Notebooks
 
