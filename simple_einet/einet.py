@@ -156,6 +156,8 @@ class Einet(nn.Module):
         Returns:
             The integration of probability density over the interval: ∫p(X)  or ∫p(X | C) if number of classes > 1.
         """
+        if interval.dim() == 2: # [D, 2]
+            interval = interval.unsqueeze(0)
 
         # Add channel dimension if not present
         if interval.dim() == 3:  # [N, D, 2]
