@@ -5,7 +5,7 @@ This repository contains code for my personal EinsumNetworks implementation.
 For a speed benchmark comparison against the official [EinsumNetworks](https://github.com/cambridge-mlg/EinsumNetworks) implementation, check out [benchmark.md](./benchmark/benchmark.md) (TLDR:  simple-einet is faster in all dimensions except the input-channel size in which it scales similar to the official EinsumNetworks implementation).
 
 ## Update
-
+* 9-27: Add `EinetCardinalityEstimator` class, see [the notebook](./src/test_einetce.ipynb) for demo!!!
 * 9-20: Add `range_sample` interface
 * 9-19: Add `integrate` interface to EiNet
 
