@@ -369,13 +369,13 @@ class AbstractLeaf(AbstractLayer, ABC):
             torch.Tensor: Output tensor after marginalization.
         """
         # Forward through base distribution
+        epsilon = 0.000001
         d = self._get_base_distribution()
         lb, ub = interval.unbind(-1)
         high = dist_cdf(d, ub)
         low = dist_cdf(d, lb)
         res = high - low
-        res = torch.where(res < 0.001, 0.001, res)
-        res = torch.where(res > 0.999, 0.999, res)
+        res = torch.where(res < epsilon, epsilon, res)
         res = res.log()
 
         return res

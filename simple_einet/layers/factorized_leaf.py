@@ -66,7 +66,7 @@ class FactorizedLeaf(AbstractLayer):
 
         self.register_buffer("scopes", scopes)
 
-    def forward(self, x: torch.Tensor, marginalized_scopes: List[int]):
+    def forward(self, x: torch.Tensor, marginalized_scopes: List[int], skip_leaf=False):
         """
         Forward pass through the factorized leaf layer.
 
@@ -77,8 +77,9 @@ class FactorizedLeaf(AbstractLayer):
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, num_output_channels, num_leaves, num_repetitions).
         """
-        # Forward through base leaf
-        x = self.base_leaf(x, marginalized_scopes)
+        if not skip_leaf:
+            # Forward through base leaf
+            x = self.base_leaf(x, marginalized_scopes)
 
         # Factorize input channels
         x = x.sum(dim=1)

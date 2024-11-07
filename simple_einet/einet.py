@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Type, Union
 import numpy as np
 import torch
 from torch import nn
+from torch import distributions as dist
 
 from simple_einet.layers.distributions.abstract_leaf import AbstractLeaf
 from simple_einet.layers.einsum import (
@@ -91,7 +92,7 @@ class Einet(nn.Module):
         # Construct the architecture
         self._build()
 
-    def forward(self, x: torch.Tensor, marginalized_scopes: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, marginalized_scopes: torch.Tensor = None, skip_leaf = False) -> torch.Tensor:
         """
         Inference pass for the Einet model.
 
@@ -103,23 +104,26 @@ class Einet(nn.Module):
             Log-likelihood tensor of the input: p(X) or p(X | C) if number of classes > 1.
         """
 
-        # Add channel dimension if not present
-        if x.dim() == 2:  # [N, D]
-            x = x.unsqueeze(1)
+        if not skip_leaf:
+            # Add channel dimension if not present
+            if x.dim() == 2:  # [N, D]
+                x = x.unsqueeze(1)
 
-        if x.dim() == 4:  # [N, C, H, W]
-            x = x.view(x.shape[0], self.config.num_channels, -1)
+            if x.dim() == 4:  # [N, C, H, W]
+                x = x.view(x.shape[0], self.config.num_channels, -1)
 
-        assert x.dim() == 3
-        assert (
-            x.shape[1] == self.config.num_channels
-        ), f"Number of channels in input ({x.shape[1]}) does not match number of channels specified in config ({self.config.num_channels})."
-        assert (
-                x.shape[2] == self.config.num_features
-        ), f"Number of features in input ({x.shape[0]}) does not match number of features specified in config ({self.config.num_features})."
+            assert x.dim() == 3
+            assert (
+                x.shape[1] == self.config.num_channels
+            ), f"Number of channels in input ({x.shape[1]}) does not match number of channels specified in config ({self.config.num_channels})."
+            assert (
+                    x.shape[2] == self.config.num_features
+            ), f"Number of features in input ({x.shape[0]}) does not match number of features specified in config ({self.config.num_features})."
 
-        # Apply leaf distributions (replace marginalization indicators with 0.0 first)
-        x = self.leaf(x, marginalized_scopes)
+            # Apply leaf distributions (replace marginalization indicators with 0.0 first)
+            x = self.leaf(x, marginalized_scopes)
+        else:
+            x = self.leaf.forward(x, marginalized_scopes, skip_leaf=True)
 
         # Pass through intermediate layers
         x = self._forward_layers(x)
@@ -206,6 +210,52 @@ class Einet(nn.Module):
         assert result.shape == (batch_size, self.config.num_classes)
 
         return result.exp()
+
+    def query_per_leaf(self, query: list[float | tuple | None], marginalized_scopes: torch.Tensor = None) -> torch.Tensor:
+        """
+        Inference pass for the Einet model.
+
+        Args:
+          interval (torch.Tensor): Integration interval of shape [N, C, D, 2], where C is the number of input channels (useful for images) and D is the number of features/random variables (H*W for images).
+          marginalized_scopes: torch.Tensor:  (Default value = None)
+
+        Returns:
+            The integration of probability density over the interval: ∫p(X)  or ∫p(X | C) if number of classes > 1.
+        """
+        
+        d = self.leaf.base_leaf._get_base_distribution()
+        loc = d.loc.squeeze()
+        scale = d.scale.squeeze()
+
+        assert(loc.shape[0] == len(query), "Dimesion does not match!")
+
+        L = self.config.num_leaves
+        R = self.config.num_repetitions
+        epsilon = 0.000001
+
+        res = []
+        for i in range(len(query)):
+            tmp = query[i]
+            if tmp is None:
+                tsr = torch.full((1, L, R), 0)
+                res.append(tsr)
+            elif type(tmp) is float:
+                norm = dist.Normal(loc=loc[i], scale=scale[i])
+                tsr = norm.log_prob(torch.tensor([tmp], requires_grad=False)).unsqueeze(0)
+                res.append(tsr)
+            elif type(tmp) is tuple:
+                norm = dist.Normal(loc=loc[i], scale=scale[i])
+                a, b = tmp
+                low = norm.cdf(torch.tensor([a], requires_grad=False)).unsqueeze(0)
+                high = norm.cdf(torch.tensor([b], requires_grad=False)).unsqueeze(0)
+                tsr = high - low
+                tsr = torch.where(tsr < epsilon, epsilon, tsr)
+                tsr = tsr.log()
+                res.append(tsr)
+            else:
+                raise TypeError(f"Unaccpeted Type:{type(tmp)}")
+
+        return torch.vstack(res)
 
     def _forward_layers(self, x):
         """
