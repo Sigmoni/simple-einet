@@ -237,7 +237,7 @@ class Einet(nn.Module):
         for i in range(len(query)):
             tmp = query[i]
             if tmp is None:
-                tsr = torch.full((1, L, R), 0)
+                tsr = torch.full((1, L, R), 0.0)
                 res.append(tsr)
             elif type(tmp) is float:
                 norm = dist.Normal(loc=loc[i], scale=scale[i])
